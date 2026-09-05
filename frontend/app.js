@@ -32,6 +32,22 @@ const ROLE_MAP = {
 
 const TOKEN_KEY = 'telusko_token';
 
+// Offline fallback — lets the board work with no backend attached.
+// Signing in with these exact credentials (and the backend unreachable)
+// switches to a locally-stored demo dataset instead of failing the login.
+const DEFAULT_USERNAME  = 'admin';
+const DEFAULT_PASSWORD  = 'admin123';
+const OFFLINE_FLAG_KEY  = 'telusko_offline';
+const OFFLINE_TASKS_KEY = 'telusko_offline_tasks';
+
+const SEED_TASKS = [
+  { id: 1, title: 'Introduction to Spring Boot', assignedRole: 'Content', state: 'code_ready', description: 'Cover project setup, auto-configuration, and starter dependencies.', createdAt: '2026-05-01' },
+  { id: 2, title: 'REST API with Spring MVC', assignedRole: 'Editor', state: 'recorded', description: 'Build a full CRUD REST API using @RestController and ResponseEntity.', createdAt: '2026-05-03' },
+  { id: 3, title: 'Spring Security — JWT Auth', assignedRole: 'Editor', state: 'editing', description: 'Implement JWT-based authentication and role-based authorization.', createdAt: '2026-05-05' },
+  { id: 4, title: 'Hibernate & JPA Deep Dive', assignedRole: 'Uploader', state: 'uploaded', description: 'Entity mapping, relationships, JPQL queries, and transaction management.', createdAt: '2026-05-08' },
+  { id: 5, title: 'Microservices with Spring Cloud', assignedRole: 'Admin', state: 'published', description: 'Service discovery, API gateway, config server, and circuit breaker patterns.', createdAt: '2026-05-10' },
+];
+
 /* ════════════════════════════════════════════════════════
    Token / Auth helpers
 ════════════════════════════════════════════════════════ */
@@ -46,6 +62,39 @@ function setToken(token) {
 
 function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+/* ─── Offline demo mode (no backend attached) ─── */
+
+function isOfflineMode() {
+  return localStorage.getItem(OFFLINE_FLAG_KEY) === '1';
+}
+
+function enterOfflineMode() {
+  localStorage.setItem(OFFLINE_FLAG_KEY, '1');
+  if (!localStorage.getItem(OFFLINE_TASKS_KEY)) {
+    localStorage.setItem(OFFLINE_TASKS_KEY, JSON.stringify(SEED_TASKS));
+  }
+  currentRole = 'Admin';
+  const config    = ROLE_CONFIG.Admin;
+  const indicator = document.getElementById('role-indicator');
+  if (indicator) {
+    indicator.textContent = `${config.label} (offline)`;
+    indicator.style.color = config.color;
+  }
+}
+
+function clearOfflineMode() {
+  localStorage.removeItem(OFFLINE_FLAG_KEY);
+  localStorage.removeItem(OFFLINE_TASKS_KEY);
+}
+
+function loadOfflineTasks() {
+  return JSON.parse(localStorage.getItem(OFFLINE_TASKS_KEY) || '[]');
+}
+
+function saveOfflineTasks(list) {
+  localStorage.setItem(OFFLINE_TASKS_KEY, JSON.stringify(list));
 }
 
 /** Decode the JWT payload (client-side only — NOT a security check). */
@@ -112,19 +161,41 @@ async function handleLoginSubmit(e) {
     });
 
     if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
+      // A real backend answers auth requests with JSON. A non-JSON error
+      // (e.g. a static file server's plain-text 404) means no backend is
+      // attached at all, so fall back to the offline demo for the default
+      // credentials instead of reporting a bogus "invalid credentials".
+      const ct = response.headers.get('content-type') || '';
+      if (!ct.includes('application/json') && username === DEFAULT_USERNAME && password === DEFAULT_PASSWORD) {
+        enterOfflineMode();
+        hideLoginForm();
+        renderBoard();
+        showToast('No backend detected — signed in with offline demo data.', 'info');
+        return;
+      }
+      const err = ct.includes('application/json') ? await response.json().catch(() => ({})) : {};
       showLoginError(err.detail || 'Invalid credentials. Please try again.');
       return;
     }
 
     const data = await response.json();
+    clearOfflineMode();
     setToken(data.access_token);
     applyRoleFromToken(data.access_token);
     hideLoginForm();
     renderBoard();
     showToast(`Welcome back, ${username}!`, 'success');
   } catch (err) {
-    showLoginError(`Could not reach the server: ${err.message}`);
+    // Backend unreachable — fall back to the offline demo dataset,
+    // but only for the known default credentials.
+    if (username === DEFAULT_USERNAME && password === DEFAULT_PASSWORD) {
+      enterOfflineMode();
+      hideLoginForm();
+      renderBoard();
+      showToast('No backend detected — signed in with offline demo data.', 'info');
+    } else {
+      showLoginError(`Could not reach the server: ${err.message}`);
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = 'Sign In';
@@ -151,6 +222,7 @@ function applyRoleFromToken(token) {
 
 function logout() {
   clearToken();
+  clearOfflineMode();
   tasks = [];
   currentRole = 'Admin';
   showLoginForm();
@@ -188,6 +260,7 @@ async function apiFetch(url, options = {}) {
 /** High-level API wrapper. Each method is "verified" — errors are never silent. */
 const api = {
   async getTasks() {
+    if (isOfflineMode()) return loadOfflineTasks();
     try {
       const res = await apiFetch('/api/tasks');
       if (!res.ok) throw new Error(`Server error ${res.status}`);
@@ -200,6 +273,14 @@ const api = {
   },
 
   async createTask(payload) {
+    if (isOfflineMode()) {
+      const list   = loadOfflineTasks();
+      const nextId = list.reduce((max, t) => Math.max(max, t.id), 0) + 1;
+      const task   = { id: nextId, createdAt: new Date().toISOString().slice(0, 10), ...payload };
+      list.push(task);
+      saveOfflineTasks(list);
+      return task;
+    }
     const res = await apiFetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -210,6 +291,14 @@ const api = {
   },
 
   async updateTask(id, updates) {
+    if (isOfflineMode()) {
+      const list = loadOfflineTasks();
+      const idx  = list.findIndex(t => t.id === id);
+      if (idx === -1) throw Object.assign(new Error('Task not found'), { status: 404, data: { detail: 'Task not found' } });
+      list[idx] = { ...list[idx], ...updates };
+      saveOfflineTasks(list);
+      return list[idx];
+    }
     const res = await apiFetch(`/api/tasks/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -220,6 +309,10 @@ const api = {
   },
 
   async deleteTask(id) {
+    if (isOfflineMode()) {
+      saveOfflineTasks(loadOfflineTasks().filter(t => t.id !== id));
+      return true;
+    }
     const res = await apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
     if (!res.ok) throw Object.assign(new Error(`Server error ${res.status}`), { status: res.status, data: res.data });
     return true;
@@ -578,9 +671,13 @@ function init() {
   // Form submission
   document.getElementById('task-form').addEventListener('submit', handleFormSubmit);
 
-  // Check for existing token
+  // Check for an active session — offline demo mode or a real token
   const token = getToken();
-  if (token) {
+  if (isOfflineMode()) {
+    enterOfflineMode();
+    renderBoard();
+    showToast('Offline demo mode active.', 'info');
+  } else if (token) {
     applyRoleFromToken(token);
     renderBoard();
     showToast('Telusko Workflow Engine ready.', 'info');

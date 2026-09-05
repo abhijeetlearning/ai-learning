@@ -1,7 +1,7 @@
 ---
 name: seed-data-extractor
 description: Use when preparing the initial database seed for the Telusko backend. Reads the seeded tasks array from frontend/app.js, validates every record against STATES order and ROLE_CONFIG, and writes a clean specs/seed-data.json ready to be consumed by Alembic.
-tools: [read, grep, write]
+tools: [Read, Grep, Write]
 model: haiku
 color: green
 ---

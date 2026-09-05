@@ -2,41 +2,41 @@
   {
     "id": 1,
     "title": "Introduction to Spring Boot",
+    "description": "Cover project setup, auto-configuration, and starter dependencies.",
     "assigned_role": "Content",
     "state": "code_ready",
-    "description": "Cover project setup, auto-configuration, and starter dependencies.",
     "created_at": "2026-05-01"
   },
   {
     "id": 2,
     "title": "REST API with Spring MVC",
+    "description": "Build a full CRUD REST API using @RestController and ResponseEntity.",
     "assigned_role": "Editor",
     "state": "recorded",
-    "description": "Build a full CRUD REST API using @RestController and ResponseEntity.",
     "created_at": "2026-05-03"
   },
   {
     "id": 3,
     "title": "Spring Security — JWT Auth",
+    "description": "Implement JWT-based authentication and role-based authorization.",
     "assigned_role": "Editor",
     "state": "editing",
-    "description": "Implement JWT-based authentication and role-based authorization.",
     "created_at": "2026-05-05"
   },
   {
     "id": 4,
     "title": "Hibernate & JPA Deep Dive",
+    "description": "Entity mapping, relationships, JPQL queries, and transaction management.",
     "assigned_role": "Uploader",
     "state": "uploaded",
-    "description": "Entity mapping, relationships, JPQL queries, and transaction management.",
     "created_at": "2026-05-08"
   },
   {
     "id": 5,
     "title": "Microservices with Spring Cloud",
+    "description": "Service discovery, API gateway, config server, and circuit breaker patterns.",
     "assigned_role": "Admin",
     "state": "published",
-    "description": "Service discovery, API gateway, config server, and circuit breaker patterns.",
     "created_at": "2026-05-10"
   }
 ]

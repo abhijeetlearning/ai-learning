@@ -1,7 +1,7 @@
 ---
 name: api-extractor
 description: Use proactively when scaffolding or modifying the Telusko backend. Reads frontend/app.js and produces specs/api-contract.md documenting the exact request/response JSON shapes the frontend expects for all four API methods plus the error-handling contract.
-tools: [read, grep, glob, write]
+tools: [Read, Grep, Glob, Write]
 model: sonnet
 color: blue
 ---

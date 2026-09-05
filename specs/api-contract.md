@@ -1,273 +1,123 @@
 # API Contract — Telusko Workflow Engine
 
-Derived from `frontend/app.js`. Describes the HTTP contract the frontend
-expects when `mockFetch` is replaced with a real `fetch()` wrapper hitting
-`http://localhost:8000`.
+Derived directly from `frontend/app.js`. This is the HTTP contract a backend
+must implement for the existing frontend to work unmodified — no frontend
+changes are assumed.
 
-## Response envelope (critical)
-
-The `api` wrapper does **not** consume a raw `fetch()` `Response` object. It
-expects the awaited value to be an envelope of the form:
-
-```js
-{ ok: boolean, status: number, data: <payload> }
-```
-
-Evidence — every method calls `await mockFetch(...)`, then `if (!res.ok)
-throw new Error(\`Server error ${res.status}\`)`, then `return res.data`
-(except `deleteTask`, which returns `true`).
-
-The replacement implementation of `mockFetch` must therefore wrap the native
-fetch call and resolve with `{ ok, status, data }` where `data` is the parsed
-JSON body. This is a frontend wrapper concern — the HTTP wire format below
-is plain JSON, no envelope.
+All endpoints are called relative to the page origin (`/api/...`). Every
+call except login attaches `Authorization: Bearer <token>` when a token is
+present (see [Auth & error handling](#auth--error-handling)).
 
 ## Task object shape
 
-The canonical shape used everywhere in the app (seed data, API responses,
-modal form payloads):
-
-| Field          | Type            | Notes                                                                     |
-|----------------|-----------------|---------------------------------------------------------------------------|
-| `id`           | integer         | Server-assigned. Used as URL path param and as `dataset.id` (parsed back). |
-| `title`        | string          | Required. Trimmed before submit; empty title rejected client-side.        |
-| `description`  | string          | Trimmed before submit.                                                    |
-| `assignedRole` | enum string     | One of `Admin`, `Content`, `Editor`, `Uploader` (matches `ROLE_CONFIG`).   |
-| `state`        | enum string     | One of `code_ready`, `recorded`, `editing`, `uploaded`, `published`.       |
-| `createdAt`    | string (date)   | ISO date (`YYYY-MM-DD`). Rendered as-is via `escapeHtml`.                  |
-
-Field names are **camelCase on the wire** — the frontend reads
-`task.assignedRole` and `task.createdAt` directly in `buildCard` / `openModal`.
-If the backend serialises in snake_case, FastAPI must alias on output (e.g.,
-Pydantic `Field(alias="assignedRole")` with `model_config = ConfigDict(populate_by_name=True)`).
-
----
-
-## GET /api/tasks
-
-**Request**: no body, no query params.
-
-**Success (`res.ok === true`)** — `res.data` is an array of task objects:
-
-```json
-[
-  {
-    "id": 1,
-    "title": "Introduction to Spring Boot",
-    "assignedRole": "Content",
-    "state": "code_ready",
-    "description": "Cover project setup...",
-    "createdAt": "2026-05-01"
-  }
-]
-```
-
-**Error handling**: caught inside `api.getTasks`. Shows toast
-`Failed to load tasks: ${err.message}` and returns
-`structuredClone(tasks)` (the in-memory seed) for graceful degradation.
-Any non-2xx (`res.ok === false`) or rejection is treated as failure.
-
----
-
-## POST /api/tasks
-
-**Request body** (`handleFormSubmit`, `app.js:425-430`):
+Wire format is camelCase:
 
 ```json
 {
-  "title":        "string",
-  "description":  "string",
-  "assignedRole": "Admin | Content | Editor | Uploader",
-  "state":        "code_ready | recorded | editing | uploaded | published"
+  "id": 1,
+  "title": "Introduction to Spring Boot",
+  "description": "Cover project setup, auto-configuration, and starter dependencies.",
+  "assignedRole": "Content",
+  "state": "code_ready",
+  "createdAt": "2026-05-01"
 }
 ```
 
-Notes:
-- `id` is **not** sent — server assigns it.
-- `createdAt` is **not** sent — server must assign it (frontend renders the
-  field, so the response must include it).
-- `title` is non-empty (validated client-side before submit).
+- `assignedRole` — one of `Admin | Content | Editor | Uploader`.
+- `state` — one of `code_ready | recorded | editing | uploaded | published`
+  (order matters — it's the pipeline sequence `STATES` in app.js).
+- `createdAt` — `YYYY-MM-DD`.
 
-**Success (`res.ok === true`)** — `res.data` is the full created task object
-(all 6 fields, including server-assigned `id` and `createdAt`).
+## `POST /api/auth/login`
 
-**Error handling**: not caught inside `api.createTask`. Propagates to the
-caller (`handleFormSubmit`) which shows
-`Save failed: ${err.message}`. The modal stays open and `renderBoard()` is
-**not** called on failure.
+Not one of the four `api.*` methods, but required for everything else to work.
 
----
+- Request: `application/x-www-form-urlencoded` body `username=...&password=...`
+  (not JSON).
+- Success response: `application/json`, must include `access_token` (a JWT).
+  The frontend decodes the JWT payload client-side (`parseJwtPayload`) and
+  reads a `role` claim with values `admin | content_team | video_editor |
+  uploader`, mapped to `Admin | Content | Editor | Uploader` respectively.
+- Failure response: **must** be `application/json` with a `detail` field.
+  A non-JSON error response (e.g. a plain-text 404 from a static file
+  server) is interpreted by the frontend as "no backend attached" and
+  triggers local offline-demo mode instead of showing the error — so a real
+  backend must always return JSON, even on failure, or logins with
+  non-default credentials will show a misleading error.
 
-## PUT /api/tasks/{id}
+## `getTasks` → `GET /api/tasks`
 
-`{id}` is the integer task id (interpolated directly via template string).
+- Request: no body, no query/path params.
+- Success response: `200`, JSON array of task objects (shape above).
+- Error handling is unique to this method: **it never throws to the
+  caller** (except on 401). Any other failure (`!res.ok`, network error) is
+  caught internally, shown as a toast (`Failed to load tasks: <message>`),
+  and the method returns a `structuredClone` of the current in-memory
+  `tasks` array — the board keeps showing stale data rather than going
+  blank.
 
-**Request body** — **partial updates are required**. Three call sites send
-different shapes:
+## `createTask` → `POST /api/tasks`
 
-1. **Column drop** (`app.js:241`) — state-only:
-   ```json
-   { "state": "editing" }
-   ```
-2. **Advance button** (`app.js:346`) — state-only:
-   ```json
-   { "state": "recorded" }
-   ```
-3. **Edit modal submit** (`app.js:425-436`) — full editable payload (no `id`,
-   no `createdAt`):
-   ```json
-   {
-     "title": "string",
-     "description": "string",
-     "assignedRole": "Admin | Content | Editor | Uploader",
-     "state": "code_ready | recorded | editing | uploaded | published"
-   }
-   ```
+- Request: `Content-Type: application/json`, body:
+  ```json
+  { "title": "...", "description": "...", "assignedRole": "Content", "state": "code_ready" }
+  ```
+  Note: no `id` or `createdAt` — the backend must generate both.
+- Success response: `200`/`201`, JSON body of the full created task object
+  (including server-assigned `id` and `createdAt`).
+- Failure response: any `!res.ok` status. The frontend throws
+  `Error("Server error <status>")` with `.status` and `.data` (the parsed
+  JSON body, if any) attached. The caller displays `data.detail` if
+  present, else the generic message — **so validation/permission errors
+  must be returned as JSON with a `detail` string.**
 
-The backend must accept any subset of `{title, description, assignedRole,
-state}` and update only the supplied fields. FastAPI: use a Pydantic schema
-with all fields `Optional` and `model_dump(exclude_unset=True)` on the service
-layer.
+## `updateTask` → `PUT /api/tasks/{id}`
 
-**Success (`res.ok === true`)** — `res.data` is returned from the wrapper but
-**no caller currently reads it**. All three call sites simply call
-`renderBoard()` after success (which re-renders from the in-memory `tasks`
-array, not from the response). The response body shape is therefore not
-load-bearing today — but to keep the contract symmetrical with POST and to
-future-proof code that may `Object.assign(task, res.data)`, return the full
-updated task object.
+- Request: `Content-Type: application/json`, body is a **partial** update —
+  e.g. `{ "state": "recorded" }` for a drag/advance move, or the full
+  `{ title, description, assignedRole, state }` set from the edit modal.
+  The backend must merge partial updates rather than requiring a full
+  object.
+- Success response: JSON body of the full updated task object.
+- Failure response: same contract as `createTask` — `.status` + `.data`
+  with a `detail` string, surfaced as `Blocked: <detail>` in the UI.
 
-**Error handling**: not caught inside `api.updateTask`. Propagates to three
-distinct callers, each with its own toast:
-- Column drop → `Could not move task: ${err.message}`
-- Advance button → `Could not advance task: ${err.message}`
-- Modal submit → `Save failed: ${err.message}`
+## `deleteTask` → `DELETE /api/tasks/{id}`
 
-On error, `renderBoard()` is **not** called. The in-memory task is left
-untouched (no local-fallback mutation).
+- Request: no body.
+- Success response: any `res.ok` status; body is ignored (the frontend
+  just returns `true`).
+- Failure response: same `.status` + `.data` contract as above, surfaced as
+  `Blocked: <detail>`.
 
----
+## Auth & error handling
 
-## DELETE /api/tasks/{id}
+- **Envelope**: every non-401 response is normalized by `apiFetch` to
+  `{ ok, status, data }`, where `data` is the parsed JSON body if the
+  response's `content-type` includes `application/json`, otherwise `null`.
+  A backend that returns errors without a JSON content-type will have
+  `data` come back `null`, and callers that expect `data.detail` will fall
+  back to a generic message.
+- **Auth header**: `Authorization: Bearer <token>` is attached to every
+  call when a token exists in `localStorage`.
+- **401 handling**: a `401` response short-circuits inside `apiFetch`
+  itself — it clears the stored token, forces the login form back open,
+  shows a `"Session expired. Please sign in again."` toast, and throws
+  `Error("Unauthorised — redirected to login")`. This happens **before**
+  any method-specific error handling, so `getTasks` correctly rethrows it
+  instead of swallowing it, but `createTask`/`updateTask`/`deleteTask`
+  callers will show a second, redundant toast (`Save failed: Unauthorised…`
+  or similar) on top of the session-expired one — existing behavior, not a
+  bug to fix on the backend side, just something to expect.
 
-**Request**: no body.
+### DISCREPANCY
 
-**Success (`res.ok === true`)** — response body is ignored; `api.deleteTask`
-returns the literal `true`. Any 2xx (200 with body, 204 No Content, etc.)
-is acceptable.
-
-**Error handling**: not caught inside `api.deleteTask`. Propagates to
-`deleteTask()` which shows `Could not delete task: ${err.message}`. The card
-remains on the board (no local removal on failure).
-
----
-
-## POST /api/auth/login
-
-Authenticate a user and receive a JWT access token.
-
-**Request body**:
-
-```json
-{
-  "username": "string",
-  "password": "string"
-}
-```
-
-**Success (`200 OK`)** — returns a JWT access token:
-
-```json
-{
-  "access_token": "string",
-  "token_type": "bearer"
-}
-```
-
-**Error handling**: `401 Unauthorized` if credentials are invalid.
-
----
-
-## POST /api/auth/users
-
-**Admin only.** Create a new user account.
-
-**Authorization**: Bearer JWT token with Admin role required.
-
-**Request body**:
-
-```json
-{
-  "username": "string",
-  "password": "string",
-  "role":     "Admin | Content | Editor | Uploader"
-}
-```
-
-**Success (`201 Created`)** — returns the created user (no password field):
-
-```json
-{
-  "id":       1,
-  "username": "string",
-  "role":     "Admin | Content | Editor | Uploader"
-}
-```
-
-**Error handling**: `403 Forbidden` if caller is not Admin. `400 Bad Request` if username already exists.
-
----
-
-## GET /api/auth/me
-
-Return the profile of the currently authenticated user.
-
-**Authorization**: Bearer JWT token required.
-
-**Request**: no body, no query params.
-
-**Success (`200 OK`)** — returns the authenticated user's profile:
-
-```json
-{
-  "id":       1,
-  "username": "string",
-  "role":     "Admin | Content | Editor | Uploader"
-}
-```
-
-**Error handling**: `401 Unauthorized` if token is missing or invalid.
-
----
-
-## Error-handling contract summary
-
-| Endpoint            | `ok===false` check         | Caught inside `api.*`? | On error                                                            |
-|---------------------|----------------------------|------------------------|---------------------------------------------------------------------|
-| `GET /api/tasks`    | `throw Error("Server error ${status}")` | Yes — caught in `api.getTasks` | Toast + fallback to in-memory seed                                  |
-| `POST /api/tasks`   | `throw Error("Server error ${status}")` | No — propagates       | `Save failed: …` toast in `handleFormSubmit`                        |
-| `PUT /api/tasks/{id}` | `throw Error("Server error ${status}")` | No — propagates     | Caller-specific toast (`Could not move/advance task`, `Save failed`) |
-| `DELETE /api/tasks/{id}` | `throw Error("Server error ${status}")` | No — propagates | `Could not delete task: …` toast                                    |
-
-The frontend distinguishes only "ok vs not ok" — no per-status-code branching.
-Any non-2xx is surfaced verbatim as `Server error ${status}`. Return standard
-REST status codes (`200`, `201`, `204`, `400`, `404`, `422`) for clean error
-messages.
-
----
-
-## Role / permission enforcement
-
-The frontend gates `canCurrentRoleAdvance` and Admin-only delete/drag UX-side,
-but per `CLAUDE.md` these are not trust boundaries. The backend must
-independently enforce:
-
-- `ROLE_CONFIG.canAdvance` on `PUT /api/tasks/{id}` when `state` is changing
-  (only Admin can move freely; other roles may only advance from the listed
-  source stages, and only to the next stage per `STATES` order).
-- Admin-only on `DELETE /api/tasks/{id}`.
-
-How the backend learns the caller's role is out of scope of the current
-`app.js` (no auth header is sent today). The FastAPI scaffold will need to
-add a JWT-based identity layer; the contract above describes only the
-request/response shapes the frontend already sends and reads.
+CLAUDE.md states role-based stage-advancement rules
+(`ROLE_CONFIG.canAdvance`) are "UX-only guards, not a trust boundary —
+there is no server in this repo to re-enforce them." Once a real backend
+exists, it **must** independently re-validate that the authenticated
+user's role is permitted to make the requested state transition on
+`updateTask`, returning a `4xx` with a JSON `detail` message on violation
+(the frontend already has a path to surface this via `Blocked: <detail>`)
+— otherwise the permission model exists only in the client and is
+trivially bypassable via direct API calls.
